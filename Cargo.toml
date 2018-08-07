@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Kyle Gretchev <kgretchev@gmail.com>"]
 
 [dependencies]
+same-file = "1.0.2"
 sha1 = "0.6.0"
 threadpool = "1.7.1"
 walkdir = "2.2.0"

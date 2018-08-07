@@ -1,12 +1,14 @@
+extern crate same_file;
 extern crate sha1;
 extern crate threadpool;
 extern crate walkdir;
 
+use same_file::Handle;
 use sha1::Sha1;
 use std::{
     env,
     fs::File,
-    io::Read,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver, Sender},
 };
@@ -18,6 +20,8 @@ enum Work {
 }
 
 fn main() {
+    let stdout = io::stdout();
+    let mut stream = stdout.lock();
     let pool = threadpool::Builder::new().build();
     let rx = start_iter(&pool);
 
@@ -34,7 +38,9 @@ fn main() {
                         .expect("Could not signal pool");
                 });
             }
-            Work::Hashed { hash, path } => println!("{},{}", path.display(), hash),
+            Work::Hashed { hash, path } => {
+                writeln!(stream, "{},{}", hash, path.display()).expect("Could not write to stdout")
+            }
         }
     }
 }
@@ -59,11 +65,19 @@ fn start_iter(pool: &ThreadPool) -> Receiver<Work> {
     let tx_send = tx.clone();
 
     pool.execute(move || {
+        let stdout_handle = Handle::stdout().expect("Could not get handle to stdout");
         let iter = walkdir::WalkDir::new(working_dir)
             .into_iter()
             .filter_map(|x| x.ok());
 
         for entry in iter {
+            let handle = Handle::from_path(entry.path()).expect("Could not get handle to path");
+
+            // If output is being piped to a file, skip hashing it.
+            if stdout_handle == handle {
+                continue;
+            }
+
             tx.send(Work::Directory {
                 tx: tx_send.clone(),
                 path: entry.path().into(),
