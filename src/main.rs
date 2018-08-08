@@ -29,8 +29,11 @@ enum Work {
         path: PathBuf,
         index: usize,
     },
+    Empty {
+        index: usize,
+    },
     DiscoveryComplete {
-        count: usize,
+        max_count: usize,
     },
 }
 
@@ -80,7 +83,7 @@ fn main() {
 
     let pool = threadpool::Builder::new().build();
     let working_dir = env::current_dir().expect("Could not get working directory");
-    //let mut progress_max = None;
+    let mut progress_max = None;
     let mut progress = 0;
     let rx = start_iter(working_dir, &pool);
 
@@ -91,12 +94,33 @@ fn main() {
                 pool.execute(move || {
                     let hash = match hash(&path, output_type) {
                         Some(h) => h,
-                        None => return,
+                        None => {
+                            tx.send(Work::Empty { index })
+                                .expect("Could not signal pool");
+                            return;
+                        }
                     };
 
                     tx.send(Work::Hashed { path, hash, index })
                         .expect("Could not signal pool");
                 });
+            }
+            Work::Empty { index: _ } => {
+                progress += 1;
+                if let Some(p) = pb.as_mut() {
+                    if let None = progress_max {
+                        p.message(&format!(
+                            " Processing files ({}) ({} : {} / {}) ",
+                            progress,
+                            pool.queued_count(),
+                            pool.active_count(),
+                            pool.max_count()
+                        ));
+                        p.tick();
+                    } else {
+                        p.inc();
+                    }
+                }
             }
             Work::Hashed {
                 hash,
@@ -107,32 +131,32 @@ fn main() {
                 print_hash(&mut output, &hash, &path);
 
                 if let Some(p) = pb.as_mut() {
-                    //if let None = progress_max {
-                    p.message(&format!(
-                        " Processing files ({}) ({} : {} / {}) ",
-                        progress,
-                        pool.queued_count(),
-                        pool.active_count(),
-                        pool.max_count()
-                    ));
-                    p.tick();
-                    //} else {
-                    //    p.inc();
-                    //}
+                    if let None = progress_max {
+                        p.message(&format!(
+                            " Processing files ({}) ({} : {} / {}) ",
+                            progress,
+                            pool.queued_count(),
+                            pool.active_count(),
+                            pool.max_count()
+                        ));
+                        p.tick();
+                    } else {
+                        p.inc();
+                    }
                 }
             }
-            Work::DiscoveryComplete { count } => {} /*match &output_type {
+            Work::DiscoveryComplete { max_count } => match &output_type {
                 OutputType::File(_) => {
-                    let mut p = ProgressBar::on(io::stderr(), count as u64);
+                    let mut p = ProgressBar::on(io::stderr(), max_count as u64);
                     p.set(progress);
                     p.show_speed = false;
-                    p.show_time_left = false;
+                    p.show_time_left = true;
 
                     pb = Some(p);
-                    progress_max = Some(count);
+                    progress_max = Some(max_count);
                 }
                 _ => {}
-            },*/
+            },
         }
     }
 }
@@ -184,13 +208,20 @@ fn start_iter(working_dir: PathBuf, pool: &ThreadPool) -> Receiver<Work> {
             .into_iter()
             .filter_map(|x| x.ok());
 
-        for entry in iter {
+        let mut max_count = 0;
+
+        for (index, entry) in iter.enumerate() {
             tx.send(Work::Directory {
                 tx: tx_send.clone(),
                 path: entry.path().into(),
-                index: 0,
+                index,
             }).expect("Could not signal pool");
+
+            max_count = index;
         }
+
+        tx.send(Work::DiscoveryComplete { max_count })
+            .expect("Could not signal pool");
     });
 
     rx
