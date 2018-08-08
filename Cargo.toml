@@ -2,8 +2,11 @@
 name = "hashy"
 version = "0.1.0"
 authors = ["Kyle Gretchev <kgretchev@gmail.com>"]
+description = "Recursively hash files on a filesystem"
 
 [dependencies]
+clap = { version = "2.32.0", default-features = false, features = [ "suggestions" ] }
+pbr = "1.0.1"
 same-file = "1.0.2"
 sha1 = "0.6.0"
 threadpool = "1.7.1"
