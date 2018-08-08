@@ -1,13 +1,11 @@
 #[macro_use]
 extern crate clap;
 extern crate pbr;
-extern crate same_file;
 extern crate sha1;
 extern crate threadpool;
 extern crate walkdir;
 
 use pbr::ProgressBar;
-use same_file::Handle;
 use sha1::Sha1;
 use std::{
     env,
@@ -41,7 +39,7 @@ enum Output<'a> {
     Stdout(StdoutLock<'a>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum OutputType {
     File(PathBuf),
     Stdout,
@@ -62,7 +60,10 @@ fn main() {
             Output::File(BufWriter::new(
                 File::create(&out).expect("Could not create output file"),
             )),
-            OutputType::File(out),
+            OutputType::File(
+                out.canonicalize()
+                    .expect("Could not canonicalize output path"),
+            ),
             Some({
                 let mut p = ProgressBar::on(io::stderr(), 0);
                 p.show_speed = false;
@@ -148,26 +149,19 @@ fn print_hash(output: &mut Output, hash: &str, path: &Path) {
 }
 
 fn hash(path: &Path, output_type: OutputType) -> Option<String> {
+    match output_type {
+        OutputType::Stdout => {}
+        OutputType::File(p) => if p == path.canonicalize().ok()? {
+            return None;
+        },
+    }
+
     let mut file = OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
         .open(path)
         .ok()?;
-
-    let out_handle = {
-        match output_type {
-            OutputType::Stdout => Handle::stdout().ok()?,
-            OutputType::File(p) => Handle::from_path(p).ok()?,
-        }
-    };
-
-    let handle = Handle::from_path(path).ok()?;
-
-    // If output is being piped to a file, skip hashing it.
-    if out_handle == handle {
-        return None;
-    }
 
     let mut buffer = [0u8; 1024 * 1024];
     let mut hash = Sha1::new();
