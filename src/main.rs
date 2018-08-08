@@ -68,7 +68,7 @@ fn main() {
                 p.show_percent = false;
                 p.show_counter = false;
                 p.show_time_left = false;
-                p.message(" Discovering files ");
+                p.message(" Processing files ");
                 p
             }),
         )
@@ -105,7 +105,7 @@ fn main() {
 
                 if let Some(p) = pb.as_mut() {
                     if let None = progress_max {
-                        p.message(&format!(" Discovering files ({}) ", progress));
+                        p.message(&format!(" Processing files ({}) ", progress));
                         p.tick();
                     } else {
                         p.inc();
@@ -141,7 +141,7 @@ fn print_hash(output: &mut Output, hash: &str, path: &Path) {
 
 fn hash(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
-    let mut buffer = [0u8; 1024 * 8];
+    let mut buffer = [0u8; 1024 * 1024];
     let mut hash = Sha1::new();
 
     loop {
