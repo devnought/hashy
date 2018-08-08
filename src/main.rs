@@ -149,7 +149,7 @@ fn main() {
                 OutputType::File(_) => {
                     let mut p = ProgressBar::on(io::stderr(), max_count as u64);
                     p.set(progress);
-                    p.show_speed = false;
+                    p.show_speed = true;
                     p.show_time_left = true;
 
                     pb = Some(p);
