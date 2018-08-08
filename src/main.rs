@@ -41,6 +41,7 @@ enum Output<'a> {
     Stdout(StdoutLock<'a>),
 }
 
+#[derive(Clone)]
 enum OutputType {
     File(PathBuf),
     Stdout,
@@ -78,15 +79,16 @@ fn main() {
 
     let pool = threadpool::Builder::new().build();
     let working_dir = env::current_dir().expect("Could not get working directory");
-    let mut progress_max = None;
+    //let mut progress_max = None;
     let mut progress = 0;
-    let rx = start_iter(working_dir, &output_type, &pool);
+    let rx = start_iter(working_dir, &pool);
 
     while let Ok(result) = rx.recv() {
         match result {
             Work::Directory { tx, path, index } => {
+                let output_type = output_type.clone();
                 pool.execute(move || {
-                    let hash = match hash(&path) {
+                    let hash = match hash(&path, output_type) {
                         Some(h) => h,
                         None => return,
                     };
@@ -104,15 +106,21 @@ fn main() {
                 print_hash(&mut output, &hash, &path);
 
                 if let Some(p) = pb.as_mut() {
-                    if let None = progress_max {
-                        p.message(&format!(" Processing files ({}) ", progress));
-                        p.tick();
-                    } else {
-                        p.inc();
-                    }
+                    //if let None = progress_max {
+                    p.message(&format!(
+                        " Processing files ({}) ({} : {} / {}) ",
+                        progress,
+                        pool.queued_count(),
+                        pool.active_count(),
+                        pool.max_count()
+                    ));
+                    p.tick();
+                    //} else {
+                    //    p.inc();
+                    //}
                 }
             }
-            Work::DiscoveryComplete { count } => match &output_type {
+            Work::DiscoveryComplete { count } => {} /*match &output_type {
                 OutputType::File(_) => {
                     let mut p = ProgressBar::on(io::stderr(), count as u64);
                     p.set(progress);
@@ -123,7 +131,7 @@ fn main() {
                     progress_max = Some(count);
                 }
                 _ => {}
-            },
+            },*/
         }
     }
 }
@@ -139,8 +147,28 @@ fn print_hash(output: &mut Output, hash: &str, path: &Path) {
     }
 }
 
-fn hash(path: &Path) -> Option<String> {
-    let mut file = File::open(path).ok()?;
+fn hash(path: &Path, output_type: OutputType) -> Option<String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(false)
+        .create(false)
+        .open(path)
+        .ok()?;
+
+    let out_handle = {
+        match output_type {
+            OutputType::Stdout => Handle::stdout().ok()?,
+            OutputType::File(p) => Handle::from_path(p).ok()?,
+        }
+    };
+
+    let handle = Handle::from_path(path).ok()?;
+
+    // If output is being piped to a file, skip hashing it.
+    if out_handle == handle {
+        return None;
+    }
+
     let mut buffer = [0u8; 1024 * 1024];
     let mut hash = Sha1::new();
 
@@ -153,60 +181,22 @@ fn hash(path: &Path) -> Option<String> {
     }
 }
 
-fn start_iter(working_dir: PathBuf, output_type: &OutputType, pool: &ThreadPool) -> Receiver<Work> {
+fn start_iter(working_dir: PathBuf, pool: &ThreadPool) -> Receiver<Work> {
     let (tx, rx) = channel();
     let tx_send = tx.clone();
-
-    let out_handle = {
-        match output_type {
-            OutputType::Stdout => Handle::stdout().expect("Could not get handle to stdout"),
-            OutputType::File(path) => {
-                Handle::from_path(path).expect("Could not get handle to output file")
-            }
-        }
-    };
 
     pool.execute(move || {
         let iter = walkdir::WalkDir::new(working_dir)
             .into_iter()
             .filter_map(|x| x.ok());
 
-        let mut file_count = 0;
-
         for entry in iter {
-            let file = if let Ok(f) = OpenOptions::new()
-                .read(true)
-                .write(false)
-                .create(false)
-                .open(entry.path())
-            {
-                f
-            } else {
-                continue;
-            };
-
-            let handle = if let Ok(h) = Handle::from_file(file) {
-                h
-            } else {
-                continue;
-            };
-
-            // If output is being piped to a file, skip hashing it.
-            if out_handle == handle {
-                continue;
-            }
-
             tx.send(Work::Directory {
                 tx: tx_send.clone(),
                 path: entry.path().into(),
-                index: file_count,
+                index: 0,
             }).expect("Could not signal pool");
-
-            file_count += 1;
         }
-
-        tx.send(Work::DiscoveryComplete { count: file_count })
-            .expect("Could not signal pool");
     });
 
     rx
