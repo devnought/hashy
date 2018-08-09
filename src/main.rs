@@ -5,7 +5,10 @@ extern crate sha1;
 extern crate threadpool;
 extern crate walkdir;
 
-use pbr::ProgressBar;
+mod cli;
+mod progress;
+
+use progress::Progress;
 use sha1::Sha1;
 use std::{
     env,
@@ -15,8 +18,6 @@ use std::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 use threadpool::ThreadPool;
-
-mod cli;
 
 enum Work {
     Directory {
@@ -33,7 +34,7 @@ enum Work {
         index: usize,
     },
     DiscoveryComplete {
-        max_count: usize,
+        count: u64,
     },
 }
 
@@ -58,7 +59,11 @@ fn main() {
         }
     };
 
-    let (mut output, output_type, mut pb) = if let Some(out) = args.output {
+    let pool = threadpool::Builder::new().build();
+    let mut pb = Progress::new(&pool);
+
+    let (mut output, output_type) = if let Some(out) = args.output {
+        pb.set_enabled(true);
         (
             Output::File(BufWriter::new(
                 File::create(&out).expect("Could not create output file"),
@@ -67,24 +72,14 @@ fn main() {
                 out.canonicalize()
                     .expect("Could not canonicalize output path"),
             ),
-            Some({
-                let mut p = ProgressBar::on(io::stderr(), 0);
-                p.show_speed = false;
-                p.show_percent = false;
-                p.show_counter = false;
-                p.show_time_left = false;
-                p.message(" Processing files ");
-                p
-            }),
         )
     } else {
-        (Output::Stdout(stdout.lock()), OutputType::Stdout, None)
+        (Output::Stdout(stdout.lock()), OutputType::Stdout)
     };
 
-    let pool = threadpool::Builder::new().build();
+    pb.build_status();
+
     let working_dir = env::current_dir().expect("Could not get working directory");
-    let mut progress_max = None;
-    let mut progress = 0;
     let rx = start_iter(working_dir, &pool);
 
     while let Ok(result) = rx.recv() {
@@ -105,58 +100,16 @@ fn main() {
                         .expect("Could not signal pool");
                 });
             }
-            Work::Empty { index: _ } => {
-                progress += 1;
-                if let Some(p) = pb.as_mut() {
-                    if let None = progress_max {
-                        p.message(&format!(
-                            " Processing files ({}) ({} : {} / {}) ",
-                            progress,
-                            pool.queued_count(),
-                            pool.active_count(),
-                            pool.max_count()
-                        ));
-                        p.tick();
-                    } else {
-                        p.inc();
-                    }
-                }
-            }
+            Work::Empty { index: _ } => pb.inc(),
             Work::Hashed {
                 hash,
                 path,
                 index: _,
             } => {
-                progress += 1;
                 print_hash(&mut output, &hash, &path);
-
-                if let Some(p) = pb.as_mut() {
-                    if let None = progress_max {
-                        p.message(&format!(
-                            " Processing files ({}) ({} : {} / {}) ",
-                            progress,
-                            pool.queued_count(),
-                            pool.active_count(),
-                            pool.max_count()
-                        ));
-                        p.tick();
-                    } else {
-                        p.inc();
-                    }
-                }
+                pb.inc_success();
             }
-            Work::DiscoveryComplete { max_count } => match &output_type {
-                OutputType::File(_) => {
-                    let mut p = ProgressBar::on(io::stderr(), max_count as u64);
-                    p.set(progress);
-                    p.show_speed = true;
-                    p.show_time_left = true;
-
-                    pb = Some(p);
-                    progress_max = Some(max_count);
-                }
-                _ => {}
-            },
+            Work::DiscoveryComplete { count } => pb.build_bar(count),
         }
     }
 }
@@ -194,7 +147,7 @@ fn hash(path: &Path, output_type: OutputType) -> Option<String> {
         match file.read(&mut buffer) {
             Ok(0) => break Some(hash.digest().to_string()),
             Ok(n) => hash.update(&buffer[0..n]),
-            Err(_) => panic!("NOOOPE"),
+            Err(_) => break None,
         }
     }
 }
@@ -208,7 +161,7 @@ fn start_iter(working_dir: PathBuf, pool: &ThreadPool) -> Receiver<Work> {
             .into_iter()
             .filter_map(|x| x.ok());
 
-        let mut max_count = 0;
+        let mut count = 0;
 
         for (index, entry) in iter.enumerate() {
             tx.send(Work::Directory {
@@ -217,11 +170,12 @@ fn start_iter(working_dir: PathBuf, pool: &ThreadPool) -> Receiver<Work> {
                 index,
             }).expect("Could not signal pool");
 
-            max_count = index;
+            count = index;
         }
 
-        tx.send(Work::DiscoveryComplete { max_count })
-            .expect("Could not signal pool");
+        tx.send(Work::DiscoveryComplete {
+            count: count as u64,
+        }).expect("Could not signal pool");
     });
 
     rx
