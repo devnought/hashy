@@ -40,7 +40,10 @@ enum Work {
 
 enum Output<'a> {
     File(BufWriter<File>),
-    Stdout(StdoutLock<'a>),
+    Stdout {
+        stream: StdoutLock<'a>,
+        working_dir: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +62,7 @@ fn main() {
         }
     };
 
+    let working_dir = env::current_dir().expect("Could not get working directory");
     let pool = threadpool::Builder::new().build();
     let mut pb = Progress::new(&pool);
 
@@ -74,12 +78,19 @@ fn main() {
             ),
         )
     } else {
-        (Output::Stdout(stdout.lock()), OutputType::Stdout)
+        (
+            Output::Stdout {
+                stream: stdout.lock(),
+                working_dir: working_dir
+                    .canonicalize()
+                    .expect("Could not get absolute working dir"),
+            },
+            OutputType::Stdout,
+        )
     };
 
     pb.build_status();
 
-    let working_dir = env::current_dir().expect("Could not get working directory");
     let rx = start_iter(working_dir, &pool);
 
     while let Ok(result) = rx.recv() {
@@ -119,8 +130,18 @@ fn print_hash(output: &mut Output, hash: &str, path: &Path) {
         Output::File(writer) => {
             writeln!(writer, "{},{}", hash, path.display()).expect("Could not write to file")
         }
-        Output::Stdout(stdout) => {
-            writeln!(stdout, "{} {}", hash, path.display()).expect("Could not write to stdout")
+        Output::Stdout {
+            stream,
+            working_dir,
+        } => {
+            let absolute_path = path
+                .canonicalize()
+                .expect("Could not get absolute file path");
+            let diff = absolute_path
+                .strip_prefix(working_dir)
+                .expect("Could not generate relative path");
+
+            writeln!(stream, "{} {}", hash, diff.display()).expect("Could not write to stdout")
         }
     }
 }
