@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate clap;
+extern crate content_inspector;
 extern crate pbr;
 extern crate sha1;
 extern crate threadpool;
@@ -8,6 +9,7 @@ extern crate walkdir;
 mod cli;
 mod progress;
 
+use content_inspector::ContentType;
 use progress::Progress;
 use sha1::Sha1;
 use std::{
@@ -26,7 +28,7 @@ enum Work {
         index: usize,
     },
     Hashed {
-        hash: String,
+        hash: (String, Option<ContentType>),
         path: PathBuf,
         index: usize,
     },
@@ -117,7 +119,8 @@ fn main() {
                 path,
                 index: _,
             } => {
-                print_hash(&mut output, &hash, &path);
+                let (h, c) = hash;
+                print_hash(&mut output, &h, c, &path);
                 pb.inc_success();
             }
             Work::DiscoveryComplete { count } => pb.build_bar(count),
@@ -125,11 +128,10 @@ fn main() {
     }
 }
 
-fn print_hash(output: &mut Output, hash: &str, path: &Path) {
+fn print_hash(output: &mut Output, hash: &str, content_type: Option<ContentType>, path: &Path) {
     match output {
-        Output::File(writer) => {
-            writeln!(writer, "{},{}", hash, path.display()).expect("Could not write to file")
-        }
+        Output::File(writer) => writeln!(writer, "{},{:?},{}", hash, content_type, path.display())
+            .expect("Could not write to file"),
         Output::Stdout {
             stream,
             working_dir,
@@ -141,12 +143,13 @@ fn print_hash(output: &mut Output, hash: &str, path: &Path) {
                 .strip_prefix(working_dir)
                 .expect("Could not generate relative path");
 
-            writeln!(stream, "{} {}", hash, diff.display()).expect("Could not write to stdout")
+            writeln!(stream, "{} {:?} {}", hash, content_type, diff.display())
+                .expect("Could not write to stdout")
         }
     }
 }
 
-fn hash(path: &Path, output_type: OutputType) -> Option<String> {
+fn hash(path: &Path, output_type: OutputType) -> Option<(String, Option<ContentType>)> {
     match output_type {
         OutputType::Stdout => {}
         OutputType::File(p) => if p == path.canonicalize().ok()? {
@@ -163,11 +166,20 @@ fn hash(path: &Path, output_type: OutputType) -> Option<String> {
 
     let mut buffer = [0u8; 1024 * 1024];
     let mut hash = Sha1::new();
+    let mut content_type = None;
 
     loop {
         match file.read(&mut buffer) {
-            Ok(0) => break Some(hash.digest().to_string()),
-            Ok(n) => hash.update(&buffer[0..n]),
+            Ok(0) => break Some((hash.digest().to_string(), content_type)),
+            Ok(n) => {
+                if let None = content_type {
+                    let len = if n > 1024 { 1024 } else { n };
+
+                    content_type = Some(content_inspector::inspect(&buffer[0..len]));
+                }
+
+                hash.update(&buffer[0..n]);
+            }
             Err(_) => break None,
         }
     }

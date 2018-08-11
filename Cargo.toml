@@ -6,6 +6,7 @@ description = "Recursively hash files on a filesystem"
 
 [dependencies]
 clap = { version = "2.32.0", default-features = false, features = [ "suggestions" ] }
+content_inspector = "0.2.1"
 pbr = "1.0.1"
 sha1 = "0.6.0"
 threadpool = "1.7.1"
