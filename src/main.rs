@@ -7,15 +7,16 @@ extern crate threadpool;
 extern crate walkdir;
 
 mod cli;
+mod processor;
 mod progress;
 
 use content_inspector::ContentType;
+use processor::ParsedFile;
 use progress::Progress;
-use sha1::Sha1;
 use std::{
     env,
-    fs::{File, OpenOptions},
-    io::{self, BufWriter, Read, StdoutLock, Write},
+    fs::File,
+    io::{self, BufWriter, StdoutLock, Write},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver, Sender},
 };
@@ -27,8 +28,8 @@ enum Work {
         path: PathBuf,
         index: usize,
     },
-    Hashed {
-        hash: (String, Option<ContentType>),
+    Parsed {
+        entry: ParsedFile,
         path: PathBuf,
         index: usize,
     },
@@ -48,12 +49,6 @@ enum Output<'a> {
     },
 }
 
-#[derive(Clone, Debug)]
-enum OutputType {
-    File(PathBuf),
-    Stdout,
-}
-
 fn main() {
     let stdout = io::stdout();
     let args = match cli::handle_args() {
@@ -68,27 +63,18 @@ fn main() {
     let pool = threadpool::Builder::new().build();
     let mut pb = Progress::new(&pool);
 
-    let (mut output, output_type) = if let Some(out) = args.output {
+    let mut output = if let Some(out) = args.output {
         pb.set_enabled(true);
-        (
-            Output::File(BufWriter::new(
-                File::create(&out).expect("Could not create output file"),
-            )),
-            OutputType::File(
-                out.canonicalize()
-                    .expect("Could not canonicalize output path"),
-            ),
-        )
+        Output::File(BufWriter::new(
+            File::create(&out).expect("Could not create output file"),
+        ))
     } else {
-        (
-            Output::Stdout {
-                stream: stdout.lock(),
-                working_dir: working_dir
-                    .canonicalize()
-                    .expect("Could not get absolute working dir"),
-            },
-            OutputType::Stdout,
-        )
+        Output::Stdout {
+            stream: stdout.lock(),
+            working_dir: working_dir
+                .canonicalize()
+                .expect("Could not get absolute working dir"),
+        }
     };
 
     pb.build_status();
@@ -98,9 +84,8 @@ fn main() {
     while let Ok(result) = rx.recv() {
         match result {
             Work::Directory { tx, path, index } => {
-                let output_type = output_type.clone();
                 pool.execute(move || {
-                    let hash = match hash(&path, output_type) {
+                    let entry = match processor::process(&path) {
                         Some(h) => h,
                         None => {
                             tx.send(Work::Empty { index })
@@ -109,18 +94,17 @@ fn main() {
                         }
                     };
 
-                    tx.send(Work::Hashed { path, hash, index })
+                    tx.send(Work::Parsed { path, entry, index })
                         .expect("Could not signal pool");
                 });
             }
             Work::Empty { index: _ } => pb.inc(),
-            Work::Hashed {
-                hash,
+            Work::Parsed {
+                entry,
                 path,
                 index: _,
             } => {
-                let (h, c) = hash;
-                print_hash(&mut output, &h, c, &path);
+                print_hash(&mut output, entry.hash(), entry.content_type(), &path);
                 pb.inc_success();
             }
             Work::DiscoveryComplete { count } => pb.build_bar(count),
@@ -129,8 +113,12 @@ fn main() {
 }
 
 fn print_hash(output: &mut Output, hash: &str, content_type: Option<ContentType>, path: &Path) {
+    let content_type = content_type
+        .map(|x| format!("{:?}", x))
+        .unwrap_or_else(|| String::from("EMPTY"));
+
     match output {
-        Output::File(writer) => writeln!(writer, "{},{:?},{}", hash, content_type, path.display())
+        Output::File(writer) => writeln!(writer, "{},{},{}", hash, content_type, path.display())
             .expect("Could not write to file"),
         Output::Stdout {
             stream,
@@ -143,44 +131,8 @@ fn print_hash(output: &mut Output, hash: &str, content_type: Option<ContentType>
                 .strip_prefix(working_dir)
                 .expect("Could not generate relative path");
 
-            writeln!(stream, "{} {:?} {}", hash, content_type, diff.display())
+            writeln!(stream, "{} {} {}", hash, content_type, diff.display())
                 .expect("Could not write to stdout")
-        }
-    }
-}
-
-fn hash(path: &Path, output_type: OutputType) -> Option<(String, Option<ContentType>)> {
-    match output_type {
-        OutputType::Stdout => {}
-        OutputType::File(p) => if p == path.canonicalize().ok()? {
-            return None;
-        },
-    }
-
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .create(false)
-        .open(path)
-        .ok()?;
-
-    let mut buffer = [0u8; 1024 * 1024];
-    let mut hash = Sha1::new();
-    let mut content_type = None;
-
-    loop {
-        match file.read(&mut buffer) {
-            Ok(0) => break Some((hash.digest().to_string(), content_type)),
-            Ok(n) => {
-                if let None = content_type {
-                    let len = if n > 1024 { 1024 } else { n };
-
-                    content_type = Some(content_inspector::inspect(&buffer[0..len]));
-                }
-
-                hash.update(&buffer[0..n]);
-            }
-            Err(_) => break None,
         }
     }
 }
