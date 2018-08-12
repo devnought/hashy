@@ -3,6 +3,8 @@ extern crate clap;
 extern crate content_inspector;
 extern crate pbr;
 extern crate sha1;
+#[macro_use]
+extern crate tantivy;
 extern crate threadpool;
 extern crate walkdir;
 
@@ -10,7 +12,6 @@ mod cli;
 mod processor;
 mod progress;
 
-use content_inspector::ContentType;
 use processor::ParsedFile;
 use progress::Progress;
 use std::{
@@ -19,6 +20,13 @@ use std::{
     io::{self, BufWriter, StdoutLock, Write},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver, Sender},
+};
+use tantivy::{
+    collector::TopCollector,
+    directory::Directory,
+    query::QueryParser,
+    schema::{SchemaBuilder, STORED, TEXT},
+    Document, Index,
 };
 use threadpool::ThreadPool;
 
@@ -77,6 +85,21 @@ fn main() {
         }
     };
 
+    let mut schema_builder = SchemaBuilder::default();
+    schema_builder.add_text_field("title", TEXT | STORED);
+    schema_builder.add_text_field("body", TEXT);
+
+    let schema = schema_builder.build();
+    let index_path = Path::new("/temp/tantivy");
+    let index =
+        Index::create_in_dir(index_path, schema.clone()).expect("Could not create tantivy index");
+    let mut index_writer = index
+        .writer(50_000_000)
+        .expect("Could not create index writer");
+
+    let title = schema.get_field("title").unwrap();
+    let body = schema.get_field("body").unwrap();
+
     pb.build_status();
 
     let rx = start_iter(working_dir, &pool);
@@ -104,22 +127,61 @@ fn main() {
                 path,
                 index: _,
             } => {
-                print_hash(&mut output, entry.hash(), entry.content_type(), &path);
+                print_hash(&mut output, &entry, &path);
+                let mut doc = Document::default();
+                doc.add_text(title, &format!("{}", path.display()));
+
+                if let Some(content) = entry.str_content() {
+                    doc.add_text(body, content);
+                }
+
+                index_writer.add_document(doc);
+
                 pb.inc_success();
             }
             Work::DiscoveryComplete { count } => pb.build_bar(count),
         }
     }
+
+    index_writer.commit().expect("Could not commit tantivy");
+    index.load_searchers().expect("Could not load searchers");
+
+    let searcher = index.searcher();
+    let mut query_parser = QueryParser::for_index(&index, vec![title, body]);
+    let query = query_parser
+        .parse_query("this is let mut")
+        .expect("Could nto parse query");
+    let mut top_collector = TopCollector::with_limit(10);
+
+    searcher
+        .search(&*query, &mut top_collector)
+        .expect("Could not search");
+    let doc_addresss = top_collector.docs();
+
+    for doc in doc_addresss {
+        let d = searcher.doc(&doc);
+
+        match output {
+            Output::File(ref mut writer) => writeln!(writer, "{:?}", d).expect("Could not write doc"),
+            Output::Stdout { ref mut stream, .. } => writeln!(stream, "{:?}", d).expect("Couyld not wrute doc"),
+        }
+    }
 }
 
-fn print_hash(output: &mut Output, hash: &str, content_type: Option<ContentType>, path: &Path) {
-    let content_type = content_type
+fn print_hash(output: &mut Output, entry: &ParsedFile, path: &Path) {
+    let content_type = entry
+        .content_type()
         .map(|x| format!("{:?}", x))
         .unwrap_or_else(|| String::from("EMPTY"));
 
     match output {
-        Output::File(writer) => writeln!(writer, "{},{},{}", hash, content_type, path.display())
-            .expect("Could not write to file"),
+        Output::File(writer) => writeln!(
+            writer,
+            "{},{},{}",
+            entry.hash(),
+            content_type,
+            path.display()
+        ).expect("Could not write to file"),
         Output::Stdout {
             stream,
             working_dir,
@@ -131,8 +193,13 @@ fn print_hash(output: &mut Output, hash: &str, content_type: Option<ContentType>
                 .strip_prefix(working_dir)
                 .expect("Could not generate relative path");
 
-            writeln!(stream, "{} {} {}", hash, content_type, diff.display())
-                .expect("Could not write to stdout")
+            writeln!(
+                stream,
+                "{} {} {}",
+                entry.hash(),
+                content_type,
+                diff.display()
+            ).expect("Could not write to stdout");
         }
     }
 }
