@@ -3,7 +3,6 @@ extern crate clap;
 extern crate content_inspector;
 extern crate pbr;
 extern crate sha1;
-#[macro_use]
 extern crate tantivy;
 extern crate threadpool;
 extern crate walkdir;
@@ -22,9 +21,6 @@ use std::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 use tantivy::{
-    collector::TopCollector,
-    directory::Directory,
-    query::QueryParser,
     schema::{SchemaBuilder, STORED, TEXT},
     Document, Index,
 };
@@ -144,28 +140,9 @@ fn main() {
     }
 
     index_writer.commit().expect("Could not commit tantivy");
-    index.load_searchers().expect("Could not load searchers");
-
-    let searcher = index.searcher();
-    let mut query_parser = QueryParser::for_index(&index, vec![title, body]);
-    let query = query_parser
-        .parse_query("this is let mut")
-        .expect("Could nto parse query");
-    let mut top_collector = TopCollector::with_limit(10);
-
-    searcher
-        .search(&*query, &mut top_collector)
-        .expect("Could not search");
-    let doc_addresss = top_collector.docs();
-
-    for doc in doc_addresss {
-        let d = searcher.doc(&doc);
-
-        match output {
-            Output::File(ref mut writer) => writeln!(writer, "{:?}", d).expect("Could not write doc"),
-            Output::Stdout { ref mut stream, .. } => writeln!(stream, "{:?}", d).expect("Couyld not wrute doc"),
-        }
-    }
+    index_writer
+        .wait_merging_threads()
+        .expect("Could not wait merge threads");
 }
 
 fn print_hash(output: &mut Output, entry: &ParsedFile, path: &Path) {
