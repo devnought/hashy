@@ -124,14 +124,13 @@ fn main() {
                 index: _,
             } => {
                 print_hash(&mut output, &entry, &path);
-                let mut doc = Document::default();
-                doc.add_text(title, &format!("{}", path.display()));
 
                 if let Some(content) = entry.str_content() {
+                    let mut doc = Document::default();
+                    doc.add_text(title, &format!("{}", path.display()));
                     doc.add_text(body, content);
+                    index_writer.add_document(doc);
                 }
-
-                index_writer.add_document(doc);
 
                 pb.inc_success();
             }
@@ -140,6 +139,7 @@ fn main() {
     }
 
     index_writer.commit().expect("Could not commit tantivy");
+
     index_writer
         .wait_merging_threads()
         .expect("Could not wait merge threads");
