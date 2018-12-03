@@ -1,6 +1,3 @@
-extern crate clap;
-extern crate tantivy;
-
 use clap::{App, Arg};
 use std::path::Path;
 use tantivy::{

@@ -1,12 +1,3 @@
-#[macro_use]
-extern crate clap;
-extern crate content_inspector;
-extern crate pbr;
-extern crate sha1;
-extern crate tantivy;
-extern crate threadpool;
-extern crate walkdir;
-
 mod cli;
 mod processor;
 mod progress;
